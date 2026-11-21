@@ -8,17 +8,26 @@
 
 ## 业务模块
 
-1. 样本库：登记名称、口径说明与原始 SELECT，防止重名；提供温控合格、路线费用、异常温控三个起始样本。
+1. 样本库：登记名称、口径说明与原始 SELECT，防止重名；提供温控合格、路线费用、异常温控、逐单结算明细四个起始样本。
 2. SQL 复核：选择基准，编辑候选，校验后创建独立批次并入 Redis 队列。
 3. 运行历史：跟踪 queued/running/passed/different/failed，失败也保留证据。
 4. 证据详情：真实 EXPLAIN ANALYZE、两侧结果行、SHA-256 摘要、遗漏/新增行和 JSON 下载。
-5. 管理员操作审计：记录写请求、执行账号和 HTTP 结果，包括拒绝请求。
+5. 到期账单撤下：对两侧都带账单号且已到期的账单登记撤下，可查待处理/已生效/失败原因，重试不新增登记。
+6. 管理员操作审计：记录写请求、执行账号和 HTTP 结果，包括拒绝请求。
+
+### 到期账单撤下口径
+
+- 只有“两侧结果都带 `invoice_id` 且账单已到期（`due_date`）”的复核证据才能登记撤下；未到期或仅单侧带账单号的账单在 API 层拒绝（422）。
+- 登记先落 `pending` 并入 Redis 撤下队列，worker 逐张处理为 `effective` 或 `failed`（含失败原因）；同一批次同一账单唯一，重复登记去重不新增，失败重试沿用原登记。
+- 撤下在**证据读取时**过滤，绝不改写留档本身：一旦生效即全局有效，旧档与之后并发发布的复核，只要含该账单行，页面与 JSON 下载都不再带回到期行，差异样本（missing/extra）同步剔除。
+- 原始结论（equivalent/error）、列结构、EXPLAIN 计划、耗时保持不变；当前行数随剔除下调，留档原行数保存在 `*_row_count_original`，其余账单照旧可查；纯聚合结果无账单号列时不受影响。
+- 中断可恢复：worker 空轮询与重启时把遗留 `pending` 登记重新入队，不丢登记、不重复建单。
 
 | 角色 | 主要页面 | 权限与典型动作 |
 |---|---|---|
 | admin 管理员 | 全部页面、审计 | 创建样本/批次、查看/导出结果、查看写操作审计 |
-| operator 操作员 | 四个业务页面 | 登记 SQL、提交后台复核、查看/导出结果；不可查看管理员审计 |
-| viewer 观察员 | 四个业务页面 | 只读与导出；API 层拒绝所有业务写请求 |
+| operator 操作员 | 五个业务页面 | 登记 SQL、提交后台复核、登记到期账单撤下、查看/导出结果；不可查看管理员审计 |
+| viewer 观察员 | 五个业务页面 | 只读与导出；API 层拒绝所有业务写请求（含撤下登记） |
 
 ## 快速启动
 
@@ -77,7 +86,7 @@ ORDER BY customer
 | db / cache | PostgreSQL 16、Redis 7 |
 | auth | JWT 8 小时有效，PBKDF2 SHA-256 加盐密码 |
 
-`backend/src/` 按 config/models/schemas/services/controllers/routes/middlewares/utils/constants 分工；`backend/scripts/seed_demo.py` 管理幂等初始化；`backend/migrations/README.md` 说明 schema v1。`frontend/src/` 按 api/stores/types/components/common/hooks/pages/router/utils/constants 分工。实体链分别为 sample、batch、evidence，各自有模型、schema、服务、路由、API、store 和页面。
+`backend/src/` 按 config/models/schemas/services/controllers/routes/middlewares/utils/constants 分工；`backend/scripts/seed_demo.py` 管理幂等初始化；`backend/migrations/README.md` 说明 schema v2。`frontend/src/` 按 api/stores/types/components/common/hooks/pages/router/utils/constants 分工。实体链分别为 sample、batch、evidence、withdrawal，各自有模型、schema、服务、路由、API、store 和页面。
 
 后端本地：创建虚拟环境并安装 `backend/requirements.txt`，先用 Compose 启动 db/redis，设置本地可达的 DATABASE_URL/REDIS_URL/JWT_SECRET，进入 backend 执行 `uvicorn src.main:app --reload`；worker 需 `/artifacts` 可写目录并执行 `python -m src.worker`。最省事的开发方式是修改源码后 `docker compose up -d --build`。前端通过 Nginx 的 `/api/` 去前缀代理访问后端，禁止双重 `/api/api`。
 
